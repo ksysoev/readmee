@@ -4,13 +4,15 @@ package ssh
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"fmt"
-	"log"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 )
 
@@ -83,16 +85,12 @@ func (s *SSH) Run(ctx context.Context) error {
 
 	defer s.wg.Wait()
 
-	s.wg.Add(1)
-
-	go func() {
-		defer s.wg.Done()
-
+	s.wg.Go(func() {
 		<-ctx.Done()
 		slog.DebugContext(ctx, "shutting down SSH server")
 
 		listener.Close()
-	}()
+	})
 
 	return s.serve(ctx, listener)
 }
@@ -100,93 +98,102 @@ func (s *SSH) Run(ctx context.Context) error {
 func (s *SSH) serve(ctx context.Context, listener net.Listener) error {
 	for {
 		conn, err := listener.Accept()
-		if err != nil {
-			return err
+
+		switch {
+		case errors.Is(err, net.ErrClosed):
+			return nil
+		case err != nil:
+			return fmt.Errorf("failed to accept connection: %v", err)
 		}
 
-		s.wg.Add(1)
-
-		go func() {
-			defer s.wg.Done()
-
+		s.wg.Go(func() {
 			s.handleConn(ctx, conn)
-		}()
+		})
 	}
 }
 
-func (s *SSH) handleConn(ctx context.Context, nConn net.Conn) {
-	defer nConn.Close()
+func (s *SSH) handleConn(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
 
-	conn, chans, reqs, err := ssh.NewServerConn(nConn, s.sshConfig)
+	sConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshConfig)
 	if err != nil {
 		return
 	}
 
-	var wg sync.WaitGroup
-	defer wg.Wait()
+	slog.DebugContext(ctx, "new SSH connection", "remote", sConn.RemoteAddr())
 
-	// The incoming Request channel must be serviced.
-	wg.Add(1)
-
-	go func() {
+	s.wg.Go(func() {
 		ssh.DiscardRequests(reqs)
-		wg.Done()
-	}()
+	})
 
 	// Service the incoming Channel channel.
-	for newChannel := range chans {
-		// Channels have a type, depending on the application level
-		// protocol intended. In the case of a shell, the type is
-		// "session" and ServerShell may be used to present a simple
-		// terminal interface.
-		if newChannel.ChannelType() != "session" {
-			err := newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case newChannel, ok := <-chans:
+			if !ok {
+				return
+			}
+
+			if newChannel.ChannelType() != "session" {
+				err := newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+				if err != nil {
+					slog.ErrorContext(ctx, "failed to reject channel", "error", err)
+				}
+
+				continue
+			}
+
+			channel, requests, err := newChannel.Accept()
 			if err != nil {
-				log.Printf("Could not reject channel: %v", err)
+				slog.ErrorContext(ctx, "could not accept channel", "error", err)
 			}
 
-			continue
+			s.wg.Go(func() {
+				s.handleChannel(ctx, channel, requests)
+			})
 		}
+	}
+}
 
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			log.Printf("Could not accept channel: %v", err)
-		}
+func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Request) {
+	defer channel.Close()
+	// Sessions have out-of-band requests such as "shell",
+	// "pty-req" and "env".  Here we handle only the
+	// "shell" request.
+	terminal := term.NewTerminal(channel, "> ")
 
-		// Sessions have out-of-band requests such as "shell",
-		// "pty-req" and "env".  Here we handle only the
-		// "shell" request.
-		wg.Add(1)
+	eg, ctx := errgroup.WithContext(ctx)
 
-		go func(in <-chan *ssh.Request) {
-			for req := range in {
-				err := req.Reply(req.Type == "shell", nil)
-				if err != nil {
-					log.Printf("Failed to reply to request: %v", err)
-				}
+	eg.Go(func() error {
+		for {
+			_, err := terminal.ReadLine()
+			if err != nil {
+				return fmt.Errorf("failed to read line: %v", err)
 			}
+		}
+	})
 
-			wg.Done()
-		}(requests)
-
-		terminal := term.NewTerminal(channel, "> ")
-
-		wg.Add(1)
-
-		go func() {
-			defer func() {
-				channel.Close()
-				wg.Done()
-			}()
-
-			for {
-				line, err := terminal.ReadLine()
-				if err != nil {
-					break
+	eg.Go(func() error {
+		for {
+			select {
+			case <-ctx.Done():
+				return io.EOF
+			case req, ok := <-requests:
+				if !ok {
+					return io.EOF
 				}
 
-				fmt.Println(line)
+				if err := req.Reply(req.Type == "shell", nil); err != nil {
+					return fmt.Errorf("failed to reply to request: %v", err)
+				}
 			}
-		}()
+		}
+	})
+
+	orgErr := eg.Wait()
+	if !errors.Is(orgErr, io.EOF) || !errors.Is(orgErr, context.Canceled) {
+		slog.ErrorContext(ctx, "error handling channel", "error", orgErr)
 	}
 }
