@@ -18,8 +18,8 @@ import (
 
 type SSH struct {
 	svc       Service
-	config    Config
 	sshConfig *ssh.ServerConfig
+	config    Config
 	wg        sync.WaitGroup
 }
 
