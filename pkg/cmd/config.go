@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/ksysoev/readmee/pkg/prov/someapi"
 	"github.com/ksysoev/readmee/pkg/ssh"
 	"github.com/spf13/viper"
 )
@@ -21,9 +20,7 @@ type RedisConfig struct {
 	Password string `mapstructure:"password"`
 }
 
-type Provider struct {
-	SomeAPI someapi.Config `mapstructure:"some_api"`
-}
+type Provider struct{}
 
 // loadConfig loads the application configuration from the specified file path and environment variables.
 // It uses the provided args structure to determine the configuration path.

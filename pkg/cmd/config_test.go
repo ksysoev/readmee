@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ksysoev/readmee/pkg/prov/someapi"
 	"github.com/ksysoev/readmee/pkg/ssh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,11 +42,7 @@ provider:
 					Addr:     "localhost:6379",
 					Password: "testpassword",
 				},
-				Provider: Provider{
-					SomeAPI: someapi.Config{
-						BaseURL: "https://api.example.com",
-					},
-				},
+				Provider: Provider{},
 			},
 		},
 		{
@@ -77,11 +72,7 @@ provider:
 					Addr:     "localhost:6379",
 					Password: "testpassword",
 				},
-				Provider: Provider{
-					SomeAPI: someapi.Config{
-						BaseURL: "https://test.com",
-					},
-				},
+				Provider: Provider{},
 			},
 		},
 	}

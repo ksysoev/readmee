@@ -12,22 +12,15 @@ type userRepo interface {
 	CheckHealth(ctx context.Context) error
 }
 
-// someAPIProv defines the interface for a provider that can check health status.
-type someAPIProv interface {
-	CheckHealth(ctx context.Context) error
-}
-
 // Service encapsulates core business logic and dependencies.
 type Service struct {
-	users   userRepo
-	someAPI someAPIProv
+	users userRepo
 }
 
 // New creates a new Service instance with the provided userRepo and someAPI.
-func New(users userRepo, someAPI someAPIProv) *Service {
+func New(users userRepo) *Service {
 	return &Service{
-		users:   users,
-		someAPI: someAPI,
+		users: users,
 	}
 }
 
@@ -35,7 +28,6 @@ func New(users userRepo, someAPI someAPIProv) *Service {
 func (s *Service) CheckHealth(ctx context.Context) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
-	eg.Go(func() error { return s.someAPI.CheckHealth(ctx) })
 	eg.Go(func() error { return s.users.CheckHealth(ctx) })
 
 	return eg.Wait()

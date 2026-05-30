@@ -9,42 +9,30 @@ import (
 
 func TestNew(t *testing.T) {
 	users := NewMockuserRepo(t)
-	someAPI := NewMocksomeAPIProv(t)
-	svc := New(users, someAPI)
+	svc := New(users)
 
 	assert.NotNil(t, svc, "New() should return a non-nil Service instance")
 }
 
 func TestService_CheckHealth(t *testing.T) {
 	tests := []struct {
-		setupMocks func(t *testing.T, users *MockuserRepo, someAPI *MocksomeAPIProv)
+		setupMocks func(t *testing.T, users *MockuserRepo)
 		name       string
 		wantErr    bool
 	}{
 		{
 			name: "Success",
-			setupMocks: func(t *testing.T, users *MockuserRepo, someAPI *MocksomeAPIProv) {
+			setupMocks: func(t *testing.T, users *MockuserRepo) {
 				t.Helper()
 				users.EXPECT().CheckHealth(mock.Anything).Return(nil)
-				someAPI.EXPECT().CheckHealth(mock.Anything).Return(nil)
 			},
 			wantErr: false,
 		},
 		{
 			name: "userRepo failure",
-			setupMocks: func(t *testing.T, users *MockuserRepo, someAPI *MocksomeAPIProv) {
+			setupMocks: func(t *testing.T, users *MockuserRepo) {
 				t.Helper()
 				users.EXPECT().CheckHealth(mock.Anything).Return(assert.AnError)
-				someAPI.EXPECT().CheckHealth(mock.Anything).Return(nil)
-			},
-			wantErr: true,
-		},
-		{
-			name: "someAPI failure",
-			setupMocks: func(t *testing.T, users *MockuserRepo, someAPI *MocksomeAPIProv) {
-				t.Helper()
-				users.EXPECT().CheckHealth(mock.Anything).Return(nil)
-				someAPI.EXPECT().CheckHealth(mock.Anything).Return(assert.AnError)
 			},
 			wantErr: true,
 		},
@@ -52,10 +40,9 @@ func TestService_CheckHealth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			users := NewMockuserRepo(t)
-			someAPI := NewMocksomeAPIProv(t)
-			s := New(users, someAPI)
+			s := New(users)
 
-			tt.setupMocks(t, users, someAPI)
+			tt.setupMocks(t, users)
 
 			err := s.CheckHealth(t.Context())
 

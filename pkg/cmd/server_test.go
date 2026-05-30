@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,26 +32,4 @@ func TestRunCommand_LoadConfigFails(t *testing.T) {
 
 	err = RunCommand(t.Context(), flags)
 	assert.ErrorContains(t, err, "failed to load config:")
-}
-
-func TestRunCommand_APIFails(t *testing.T) {
-	t.Setenv("API_LISTEN", "WRONG_ADDRESS_TO_LISTEN")
-	err := RunCommand(t.Context(), &cmdFlags{LogLevel: "info"})
-	assert.ErrorContains(t, err, "failed to run API service:")
-}
-
-func TestRunCommand_Success(t *testing.T) {
-	t.Setenv("API_LISTEN", ":0")
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-
-		cancel()
-	}()
-
-	err := RunCommand(ctx, &cmdFlags{LogLevel: "info"})
-	assert.NoError(t, err, "expected RunCommand to succeed with valid configuration")
 }

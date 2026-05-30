@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/ksysoev/readmee/pkg/core"
-	"github.com/ksysoev/readmee/pkg/prov/someapi"
 	"github.com/ksysoev/readmee/pkg/repo/user"
 	"github.com/ksysoev/readmee/pkg/ssh"
 	"github.com/redis/go-redis/v9"
@@ -28,18 +27,17 @@ func RunCommand(ctx context.Context, flags *cmdFlags) error {
 		Password: cfg.Redis.Password,
 	})
 
-	someAPI := someapi.New(cfg.Provider.SomeAPI)
 	userRepo := user.New(rdb)
-	svc := core.New(userRepo, someAPI)
+	svc := core.New(userRepo)
 
 	sshSvc, err := ssh.New(cfg.SSH, svc)
 	if err != nil {
-		return fmt.Errorf("failed to create API service: %w", err)
+		return fmt.Errorf("failed to create ssh service: %w", err)
 	}
 
 	err = sshSvc.Run(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to run API service: %w", err)
+		return fmt.Errorf("failed to run ssh service: %w", err)
 	}
 
 	return nil
