@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -14,8 +15,10 @@ import (
 )
 
 type SSH struct {
-	svc    Service
-	config Config
+	svc       Service
+	config    Config
+	sshConfig *ssh.ServerConfig
+	wg        sync.WaitGroup
 }
 
 type Config struct {
@@ -33,19 +36,6 @@ func New(cfg Config, svc Service) (*SSH, error) {
 		return nil, fmt.Errorf("listen address must be specified")
 	}
 
-	api := &SSH{
-		config: cfg,
-		svc:    svc,
-	}
-
-	return api, nil
-}
-
-// Run starts the API server with the provided configuration.
-// It listens on the address specified in the configuration and handles graceful shutdown.
-// The server will log any errors encountered during shutdown.
-// If the server fails to start, it returns an error.
-func (s *SSH) Run(ctx context.Context) error {
 	config := &ssh.ServerConfig{
 		// Remove to disable public key auth.
 		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
@@ -60,34 +50,77 @@ func (s *SSH) Run(ctx context.Context) error {
 
 	privateKey, err := rsa.GenerateKey(nil, 2048)
 	if err != nil {
-		return fmt.Errorf("failed to generate private key: %v", err)
+		return nil, fmt.Errorf("failed to generate private key: %v", err)
 	}
 
 	signer, err := ssh.NewSignerFromKey(privateKey)
 	if err != nil {
-		return fmt.Errorf("failed to create signer: %v", err)
+		return nil, fmt.Errorf("failed to create signer: %v", err)
 	}
 
 	config.AddHostKey(signer)
 
+	api := &SSH{
+		config:    cfg,
+		svc:       svc,
+		sshConfig: config,
+	}
+
+	return api, nil
+}
+
+// Run starts the API server with the provided configuration.
+// It listens on the address specified in the configuration and handles graceful shutdown.
+// The server will log any errors encountered during shutdown.
+// If the server fails to start, it returns an error.
+func (s *SSH) Run(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.config.Listen)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %v", s.config.Listen, err)
 	}
 
-	nConn, err := listener.Accept()
-	if err != nil {
-		return fmt.Errorf("failed to accept incoming connection: %v", err)
-	}
+	slog.InfoContext(ctx, "SSH server is listening", "addr", s.config.Listen)
 
-	// Before use, a handshake must be performed on the incoming
-	// net.Conn.
-	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
-	if err != nil {
-		return fmt.Errorf("failed to handshake: %v", err)
-	}
+	defer s.wg.Wait()
 
-	log.Printf("logged in with key %s", conn.Permissions.Extensions["pubkey-fp"])
+	s.wg.Add(1)
+
+	go func() {
+		defer s.wg.Done()
+
+		<-ctx.Done()
+		slog.DebugContext(ctx, "shutting down SSH server")
+
+		listener.Close()
+	}()
+
+	return s.serve(ctx, listener)
+}
+
+func (s *SSH) serve(ctx context.Context, listener net.Listener) error {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+
+		s.wg.Add(1)
+
+		go func() {
+			defer s.wg.Done()
+
+			s.handleConn(ctx, conn)
+		}()
+	}
+}
+
+func (s *SSH) handleConn(ctx context.Context, nConn net.Conn) {
+	defer nConn.Close()
+
+	conn, chans, reqs, err := ssh.NewServerConn(nConn, s.sshConfig)
+	if err != nil {
+		return
+	}
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -156,6 +189,4 @@ func (s *SSH) Run(ctx context.Context) error {
 			}
 		}()
 	}
-
-	return nil
 }
