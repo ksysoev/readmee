@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ksysoev/readmee/pkg/prov/someapi"
+	"github.com/ksysoev/readmee/pkg/ssh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/ksysoev/readmee/pkg/api"
-	"github.com/ksysoev/readmee/pkg/prov/someapi"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -36,7 +36,7 @@ provider:
 			expectError: false,
 			configData:  validConfig,
 			expectConfig: &appConfig{
-				API: api.Config{
+				SSH: ssh.Config{
 					Listen: ":8082",
 				},
 				Redis: RedisConfig{
@@ -70,7 +70,7 @@ provider:
 			expectError: false,
 			configData:  validConfig,
 			expectConfig: &appConfig{
-				API: api.Config{
+				SSH: ssh.Config{
 					Listen: ":8083",
 				},
 				Redis: RedisConfig{

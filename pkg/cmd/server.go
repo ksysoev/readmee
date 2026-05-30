@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/redis/go-redis/v9"
-	"github.com/ksysoev/readmee/pkg/api"
 	"github.com/ksysoev/readmee/pkg/core"
 	"github.com/ksysoev/readmee/pkg/prov/someapi"
 	"github.com/ksysoev/readmee/pkg/repo/user"
+	"github.com/ksysoev/readmee/pkg/ssh"
+	"github.com/redis/go-redis/v9"
 )
 
 // RunCommand initializes the logger, loads configuration, creates the core and API services,
@@ -32,12 +32,12 @@ func RunCommand(ctx context.Context, flags *cmdFlags) error {
 	userRepo := user.New(rdb)
 	svc := core.New(userRepo, someAPI)
 
-	apiSvc, err := api.New(cfg.API, svc)
+	sshSvc, err := ssh.New(cfg.SSH, svc)
 	if err != nil {
 		return fmt.Errorf("failed to create API service: %w", err)
 	}
 
-	err = apiSvc.Run(ctx)
+	err = sshSvc.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to run API service: %w", err)
 	}

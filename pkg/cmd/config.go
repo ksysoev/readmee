@@ -5,13 +5,13 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/spf13/viper"
-	"github.com/ksysoev/readmee/pkg/api"
 	"github.com/ksysoev/readmee/pkg/prov/someapi"
+	"github.com/ksysoev/readmee/pkg/ssh"
+	"github.com/spf13/viper"
 )
 
 type appConfig struct {
-	API      api.Config  `mapstructure:"api"`
+	SSH      ssh.Config  `mapstructure:"api"`
 	Redis    RedisConfig `mapstructure:"redis"`
 	Provider Provider    `mapstructure:"provider"`
 }
