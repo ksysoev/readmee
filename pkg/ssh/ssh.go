@@ -3,23 +3,28 @@ package ssh
 
 import (
 	"context"
-	"crypto/rsa"
+	"errors"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"net"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 )
 
 type SSH struct {
-	svc    Service
-	config Config
+	svc       Service
+	sshConfig *ssh.ServerConfig
+	config    Config
+	wg        sync.WaitGroup
 }
 
 type Config struct {
-	Listen string `mapstructure:"listen"`
+	Listen     string `mapstructure:"listen"`
+	PrivateKey string `mapstructure:"private_key"`
 }
 
 type Service interface {
@@ -33,19 +38,10 @@ func New(cfg Config, svc Service) (*SSH, error) {
 		return nil, fmt.Errorf("listen address must be specified")
 	}
 
-	api := &SSH{
-		config: cfg,
-		svc:    svc,
+	if svc == nil {
+		return nil, fmt.Errorf("service must be provided")
 	}
 
-	return api, nil
-}
-
-// Run starts the API server with the provided configuration.
-// It listens on the address specified in the configuration and handles graceful shutdown.
-// The server will log any errors encountered during shutdown.
-// If the server fails to start, it returns an error.
-func (s *SSH) Run(ctx context.Context) error {
 	config := &ssh.ServerConfig{
 		// Remove to disable public key auth.
 		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
@@ -58,104 +54,149 @@ func (s *SSH) Run(ctx context.Context) error {
 		},
 	}
 
-	privateKey, err := rsa.GenerateKey(nil, 2048)
+	privateKey, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
 	if err != nil {
-		return fmt.Errorf("failed to generate private key: %v", err)
+		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		return fmt.Errorf("failed to create signer: %v", err)
+	config.AddHostKey(privateKey)
+
+	api := &SSH{
+		config:    cfg,
+		svc:       svc,
+		sshConfig: config,
 	}
 
-	config.AddHostKey(signer)
+	return api, nil
+}
 
+// Run starts the API server with the provided configuration.
+// It listens on the address specified in the configuration and handles graceful shutdown.
+// The server will log any errors encountered during shutdown.
+// If the server fails to start, it returns an error.
+func (s *SSH) Run(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.config.Listen)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %v", s.config.Listen, err)
+		return fmt.Errorf("failed to listen on %s: %w", s.config.Listen, err)
 	}
 
-	nConn, err := listener.Accept()
+	slog.InfoContext(ctx, "SSH server is listening", "addr", s.config.Listen)
+
+	defer s.wg.Wait()
+
+	s.wg.Go(func() {
+		<-ctx.Done()
+		slog.DebugContext(ctx, "shutting down SSH server")
+
+		listener.Close()
+	})
+
+	return s.serve(ctx, listener)
+}
+
+func (s *SSH) serve(ctx context.Context, listener net.Listener) error {
+	for {
+		conn, err := listener.Accept()
+
+		switch {
+		case errors.Is(err, net.ErrClosed):
+			return nil
+		case err != nil:
+			return fmt.Errorf("failed to accept connection: %w", err)
+		}
+
+		s.wg.Go(func() {
+			s.handleConn(ctx, conn)
+		})
+	}
+}
+
+// handleConn handles an incoming SSH connection by performing the SSH handshake and processing incoming channels and requests.
+// It logs the remote address of the new connection and discards any incoming requests.
+// For each accepted channel, it spawns a new goroutine to handle the channel and its requests.
+// If any errors occur during the SSH handshake or channel processing, they are logged.
+func (s *SSH) handleConn(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+
+	sConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshConfig)
 	if err != nil {
-		return fmt.Errorf("failed to accept incoming connection: %v", err)
+		return
 	}
 
-	// Before use, a handshake must be performed on the incoming
-	// net.Conn.
-	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
-	if err != nil {
-		return fmt.Errorf("failed to handshake: %v", err)
-	}
+	slog.DebugContext(ctx, "new SSH connection", "remote", sConn.RemoteAddr())
 
-	log.Printf("logged in with key %s", conn.Permissions.Extensions["pubkey-fp"])
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	// The incoming Request channel must be serviced.
-	wg.Add(1)
-
-	go func() {
+	s.wg.Go(func() {
 		ssh.DiscardRequests(reqs)
-		wg.Done()
-	}()
+	})
 
 	// Service the incoming Channel channel.
-	for newChannel := range chans {
-		// Channels have a type, depending on the application level
-		// protocol intended. In the case of a shell, the type is
-		// "session" and ServerShell may be used to present a simple
-		// terminal interface.
-		if newChannel.ChannelType() != "session" {
-			err := newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case newChannel, ok := <-chans:
+			if !ok {
+				return
+			}
+
+			if newChannel.ChannelType() != "session" {
+				err := newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+				if err != nil {
+					slog.ErrorContext(ctx, "failed to reject channel", "error", err)
+				}
+
+				continue
+			}
+
+			channel, requests, err := newChannel.Accept()
 			if err != nil {
-				log.Printf("Could not reject channel: %v", err)
+				slog.ErrorContext(ctx, "could not accept channel", "error", err)
 			}
 
-			continue
+			s.wg.Go(func() {
+				s.handleChannel(ctx, channel, requests)
+			})
 		}
-
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			log.Printf("Could not accept channel: %v", err)
-		}
-
-		// Sessions have out-of-band requests such as "shell",
-		// "pty-req" and "env".  Here we handle only the
-		// "shell" request.
-		wg.Add(1)
-
-		go func(in <-chan *ssh.Request) {
-			for req := range in {
-				err := req.Reply(req.Type == "shell", nil)
-				if err != nil {
-					log.Printf("Failed to reply to request: %v", err)
-				}
-			}
-
-			wg.Done()
-		}(requests)
-
-		terminal := term.NewTerminal(channel, "> ")
-
-		wg.Add(1)
-
-		go func() {
-			defer func() {
-				channel.Close()
-				wg.Done()
-			}()
-
-			for {
-				line, err := terminal.ReadLine()
-				if err != nil {
-					break
-				}
-
-				fmt.Println(line)
-			}
-		}()
 	}
+}
 
-	return nil
+// handleChannel handles an accepted SSH channel by creating a terminal interface and processing incoming requests.
+// it reads lines from the terminal and replies to shell requests. If any errors occur during processing, they are logged.
+func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Request) {
+	defer channel.Close()
+
+	terminal := term.NewTerminal(channel, "> ")
+
+	eg, ctx := errgroup.WithContext(ctx)
+
+	eg.Go(func() error {
+		for {
+			_, err := terminal.ReadLine()
+			if err != nil {
+				return fmt.Errorf("failed to read line: %w", err)
+			}
+		}
+	})
+
+	eg.Go(func() error {
+		for {
+			select {
+			case <-ctx.Done():
+				return io.EOF
+			case req, ok := <-requests:
+				if !ok {
+					return io.EOF
+				}
+
+				if err := req.Reply(req.Type == "shell", nil); err != nil {
+					return fmt.Errorf("failed to reply to request: %w", err)
+				}
+			}
+		}
+	})
+
+	err := eg.Wait()
+	if err != nil && !errors.Is(err, io.EOF) {
+		slog.ErrorContext(ctx, "error handling channel", "error", err)
+	}
 }

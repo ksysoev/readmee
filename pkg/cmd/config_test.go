@@ -12,7 +12,7 @@ import (
 
 func TestLoadConfig(t *testing.T) {
 	const validConfig = `
-api:
+ssh:
   listen: ":8082"
 redis:
   addr: "localhost:6379"
@@ -59,8 +59,7 @@ provider:
 		{
 			name: "valid config with environment overrides",
 			envVars: map[string]string{
-				"API_LISTEN":                 ":8083",
-				"PROVIDER_SOME_API_BASE_URL": "https://test.com",
+				"SSH_LISTEN": ":8083",
 			},
 			expectError: false,
 			configData:  validConfig,
