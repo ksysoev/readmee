@@ -52,12 +52,12 @@ func New(cfg Config, svc Service) (*SSH, error) {
 
 	privateKey, err := rsa.GenerateKey(nil, 2048)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate private key: %v", err)
+		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
 	signer, err := ssh.NewSignerFromKey(privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %v", err)
+		return nil, fmt.Errorf("failed to create signer: %w", err)
 	}
 
 	config.AddHostKey(signer)
@@ -78,7 +78,7 @@ func New(cfg Config, svc Service) (*SSH, error) {
 func (s *SSH) Run(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.config.Listen)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %v", s.config.Listen, err)
+		return fmt.Errorf("failed to listen on %s: %w", s.config.Listen, err)
 	}
 
 	slog.InfoContext(ctx, "SSH server is listening", "addr", s.config.Listen)
@@ -103,7 +103,7 @@ func (s *SSH) serve(ctx context.Context, listener net.Listener) error {
 		case errors.Is(err, net.ErrClosed):
 			return nil
 		case err != nil:
-			return fmt.Errorf("failed to accept connection: %v", err)
+			return fmt.Errorf("failed to accept connection: %w", err)
 		}
 
 		s.wg.Go(func() {
@@ -159,9 +159,7 @@ func (s *SSH) handleConn(ctx context.Context, conn net.Conn) {
 
 func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Request) {
 	defer channel.Close()
-	// Sessions have out-of-band requests such as "shell",
-	// "pty-req" and "env".  Here we handle only the
-	// "shell" request.
+
 	terminal := term.NewTerminal(channel, "> ")
 
 	eg, ctx := errgroup.WithContext(ctx)
@@ -170,7 +168,7 @@ func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <
 		for {
 			_, err := terminal.ReadLine()
 			if err != nil {
-				return fmt.Errorf("failed to read line: %v", err)
+				return fmt.Errorf("failed to read line: %w", err)
 			}
 		}
 	})
@@ -186,14 +184,14 @@ func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <
 				}
 
 				if err := req.Reply(req.Type == "shell", nil); err != nil {
-					return fmt.Errorf("failed to reply to request: %v", err)
+					return fmt.Errorf("failed to reply to request: %w", err)
 				}
 			}
 		}
 	})
 
-	orgErr := eg.Wait()
-	if !errors.Is(orgErr, io.EOF) || !errors.Is(orgErr, context.Canceled) {
-		slog.ErrorContext(ctx, "error handling channel", "error", orgErr)
+	err := eg.Wait()
+	if err != nil && !errors.Is(err, io.EOF) {
+		slog.ErrorContext(ctx, "error handling channel", "error", err)
 	}
 }
