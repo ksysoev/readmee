@@ -1,4 +1,4 @@
-api:
+ssh:
   listen: :8080
 
 redis:

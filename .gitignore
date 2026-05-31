@@ -27,6 +27,8 @@ go.work.sum
 # env file
 .env
 
+id_rsa*
+
 # Editor/IDE
 # .idea/
 # .vscode/

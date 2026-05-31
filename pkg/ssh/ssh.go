@@ -3,7 +3,6 @@ package ssh
 
 import (
 	"context"
-	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +23,8 @@ type SSH struct {
 }
 
 type Config struct {
-	Listen string `mapstructure:"listen"`
+	Listen     string `mapstructure:"listen"`
+	PrivateKey string `mapstructure:"private_key"`
 }
 
 type Service interface {
@@ -50,17 +50,13 @@ func New(cfg Config, svc Service) (*SSH, error) {
 		},
 	}
 
-	privateKey, err := rsa.GenerateKey(nil, 2048)
+	fmt.Printf("private key: %s\n", cfg.PrivateKey)
+	privateKey, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %w", err)
-	}
-
-	config.AddHostKey(signer)
+	config.AddHostKey(privateKey)
 
 	api := &SSH{
 		config:    cfg,
@@ -112,6 +108,10 @@ func (s *SSH) serve(ctx context.Context, listener net.Listener) error {
 	}
 }
 
+// handleConn handles an incoming SSH connection by performing the SSH handshake and processing incoming channels and requests.
+// It logs the remote address of the new connection and discards any incoming requests.
+// For each accepted channel, it spawns a new goroutine to handle the channel and its requests.
+// If any errors occur during the SSH handshake or channel processing, they are logged.
 func (s *SSH) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
@@ -157,6 +157,8 @@ func (s *SSH) handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// handleChannel handles an accepted SSH channel by creating a terminal interface and processing incoming requests.
+// it reads lines from the terminal and replies to shell requests. If any errors occur during processing, they are logged.
 func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Request) {
 	defer channel.Close()
 

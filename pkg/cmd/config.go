@@ -12,7 +12,7 @@ import (
 type appConfig struct {
 	Provider Provider    `mapstructure:"provider"`
 	Redis    RedisConfig `mapstructure:"redis"`
-	SSH      ssh.Config  `mapstructure:"api"`
+	SSH      ssh.Config  `mapstructure:"ssh"`
 }
 
 type RedisConfig struct {
