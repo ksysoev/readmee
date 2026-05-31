@@ -38,6 +38,10 @@ func New(cfg Config, svc Service) (*SSH, error) {
 		return nil, fmt.Errorf("listen address must be specified")
 	}
 
+	if svc == nil {
+		return nil, fmt.Errorf("service must be provided")
+	}
+
 	config := &ssh.ServerConfig{
 		// Remove to disable public key auth.
 		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
@@ -50,7 +54,6 @@ func New(cfg Config, svc Service) (*SSH, error) {
 		},
 	}
 
-	fmt.Printf("private key: %s\n", cfg.PrivateKey)
 	privateKey, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
