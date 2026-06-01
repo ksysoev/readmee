@@ -5,21 +5,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"sync"
+	"time"
 
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/sync/errgroup"
-	"golang.org/x/term"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/wish/v2"
+	"charm.land/wish/v2/bubbletea"
+	"github.com/charmbracelet/ssh"
 )
 
 type SSH struct {
-	svc       Service
-	sshConfig *ssh.ServerConfig
-	config    Config
-	wg        sync.WaitGroup
+	svc    Service
+	config Config
+	wg     sync.WaitGroup
+	server *ssh.Server
 }
 
 type Config struct {
@@ -42,32 +42,28 @@ func New(cfg Config, svc Service) (*SSH, error) {
 		return nil, fmt.Errorf("service must be provided")
 	}
 
-	config := &ssh.ServerConfig{
-		// Remove to disable public key auth.
-		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
-			return &ssh.Permissions{
-				// Record the public key used for authentication.
-				Extensions: map[string]string{
-					"pubkey-fp": ssh.FingerprintSHA256(pubKey),
-				},
-			}, nil
-		},
+	s := &SSH{
+		config: cfg,
+		svc:    svc,
 	}
 
-	privateKey, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
+	server, err := wish.NewServer(
+		wish.WithAddress(cfg.Listen),
+		wish.WithHostKeyPEM([]byte(cfg.PrivateKey)),
+		wish.WithPublicKeyAuth(func(_ ssh.Context, _ ssh.PublicKey) bool {
+			return true
+		}),
+		wish.WithMiddleware(
+			bubbletea.Middleware(s.appRouter), // Bubble Tea apps usually require an app router.
+		),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate private key: %w", err)
+		return nil, fmt.Errorf("failed to create SSH server: %w", err)
 	}
 
-	config.AddHostKey(privateKey)
+	s.server = server
 
-	api := &SSH{
-		config:    cfg,
-		svc:       svc,
-		sshConfig: config,
-	}
-
-	return api, nil
+	return s, nil
 }
 
 // Run starts the API server with the provided configuration.
@@ -75,128 +71,83 @@ func New(cfg Config, svc Service) (*SSH, error) {
 // The server will log any errors encountered during shutdown.
 // If the server fails to start, it returns an error.
 func (s *SSH) Run(ctx context.Context) error {
-	listener, err := net.Listen("tcp", s.config.Listen)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", s.config.Listen, err)
-	}
-
-	slog.InfoContext(ctx, "SSH server is listening", "addr", s.config.Listen)
-
 	defer s.wg.Wait()
 
 	s.wg.Go(func() {
 		<-ctx.Done()
 		slog.DebugContext(ctx, "shutting down SSH server")
 
-		listener.Close()
+		if err := s.server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+			slog.Error("Could not stop server", "error", err)
+		}
 	})
 
-	return s.serve(ctx, listener)
+	return s.server.ListenAndServe()
 }
 
-func (s *SSH) serve(ctx context.Context, listener net.Listener) error {
-	for {
-		conn, err := listener.Accept()
-
-		switch {
-		case errors.Is(err, net.ErrClosed):
-			return nil
-		case err != nil:
-			return fmt.Errorf("failed to accept connection: %w", err)
-		}
-
-		s.wg.Go(func() {
-			s.handleConn(ctx, conn)
-		})
+func (s *SSH) appRouter(session ssh.Session) (tea.Model, []tea.ProgramOption) {
+	slog.Info("New SSH session", "user", session.User(), "remote_addr", session.RemoteAddr(), "command", session.Command())
+	_, _, active := session.Pty()
+	if !active {
+		slog.Warn("No PTY requested, closing session")
+		// return nil, nil
 	}
+
+	args := session.Command()
+
+	var appName string
+	if len(args) > 0 {
+		appName = args[0]
+		slog.Info("Running app", "app_name", appName)
+	}
+
+	opts := []tea.ProgramOption{tea.MakeOptions(sess), tea.WithAltScreen()}
+
+	return model(5), opts
 }
 
-// handleConn handles an incoming SSH connection by performing the SSH handshake and processing incoming channels and requests.
-// It logs the remote address of the new connection and discards any incoming requests.
-// For each accepted channel, it spawns a new goroutine to handle the channel and its requests.
-// If any errors occur during the SSH handshake or channel processing, they are logged.
-func (s *SSH) handleConn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+type model int
 
-	sConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshConfig)
-	if err != nil {
-		return
-	}
-
-	slog.DebugContext(ctx, "new SSH connection", "remote", sConn.RemoteAddr())
-
-	s.wg.Go(func() {
-		ssh.DiscardRequests(reqs)
-	})
-
-	// Service the incoming Channel channel.
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case newChannel, ok := <-chans:
-			if !ok {
-				return
-			}
-
-			if newChannel.ChannelType() != "session" {
-				err := newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
-				if err != nil {
-					slog.ErrorContext(ctx, "failed to reject channel", "error", err)
-				}
-
-				continue
-			}
-
-			channel, requests, err := newChannel.Accept()
-			if err != nil {
-				slog.ErrorContext(ctx, "could not accept channel", "error", err)
-			}
-
-			s.wg.Go(func() {
-				s.handleChannel(ctx, channel, requests)
-			})
-		}
-	}
+// Init optionally returns an initial command we should run. In this case we
+// want to start the timer.
+func (m model) Init() tea.Cmd {
+	return tick
 }
 
-// handleChannel handles an accepted SSH channel by creating a terminal interface and processing incoming requests.
-// it reads lines from the terminal and replies to shell requests. If any errors occur during processing, they are logged.
-func (s *SSH) handleChannel(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Request) {
-	defer channel.Close()
-
-	terminal := term.NewTerminal(channel, "> ")
-
-	eg, ctx := errgroup.WithContext(ctx)
-
-	eg.Go(func() error {
-		for {
-			_, err := terminal.ReadLine()
-			if err != nil {
-				return fmt.Errorf("failed to read line: %w", err)
-			}
+// Update is called when messages are received. The idea is that you inspect the
+// message and send back an updated model accordingly. You can also return
+// a command, which is a function that performs I/O and returns a message.
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "ctrl+z":
+			return m, tea.Suspend
 		}
-	})
 
-	eg.Go(func() error {
-		for {
-			select {
-			case <-ctx.Done():
-				return io.EOF
-			case req, ok := <-requests:
-				if !ok {
-					return io.EOF
-				}
-
-				if err := req.Reply(req.Type == "shell", nil); err != nil {
-					return fmt.Errorf("failed to reply to request: %w", err)
-				}
-			}
+	case tickMsg:
+		m--
+		if m <= 0 {
+			return m, tea.Quit
 		}
-	})
-
-	err := eg.Wait()
-	if err != nil && !errors.Is(err, io.EOF) {
-		slog.ErrorContext(ctx, "error handling channel", "error", err)
+		return m, tick
 	}
+	return m, nil
+}
+
+// View returns a string based on data in the model. That string which will be
+// rendered to the terminal.
+func (m model) View() tea.View {
+	return tea.NewView(fmt.Sprintf("Hi. This program will exit in %d seconds.\n\nTo quit sooner press ctrl-c, or press ctrl-z to suspend...\n", m))
+}
+
+// Messages are events that we respond to in our Update function. This
+// particular one indicates that the timer has ticked.
+type tickMsg time.Time
+
+func tick() tea.Msg {
+	time.Sleep(time.Second)
+	return tickMsg{}
 }
